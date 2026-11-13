@@ -1,72 +1,38 @@
-"use client";
-import { useState } from "react";
-import { motion, useReducedMotion } from "motion/react";
-const states = [
+const questions = [
   [
-    "Holding",
-    "Your stake is in shares.",
-    "An rNEAR balance tells you how many shares the account holds. A withdrawal appears separately after an unstake request.",
-    "Inspect shares",
+    "What happens if the Rhea website goes down?",
+    "Your staking position lives on NEAR. The recovery desk reads the contract directly. A downloaded client can do the same from another origin as long as NEAR RPC is reachable.",
   ],
   [
-    "Waiting",
-    "A withdrawal is pending.",
-    "The staking contract records pending NEAR. An estimated unlock time helps you plan when to check again.",
-    "Check eligibility",
+    "Do I need a wallet just to look up an account?",
+    "No. Public balances, withdrawal status and historical transaction verification work without wallet access. You connect a compatible NEAR wallet to authorize an unstake, claim or transfer.",
   ],
   [
-    "Eligible",
-    "The owner can review a claim.",
-    "Once the contract confirms eligibility, Vestiquay shows the receiver, amount and method. The wallet owner reviews the withdrawal before signing.",
-    "Review withdrawal",
+    "Why can’t I claim my rNEAR immediately?",
+    "rNEAR represents staking shares. A delayed unstake puts NEAR in a pending withdrawal. The contract determines when the pending balance becomes eligible. Any time displayed in the desk is an estimate.",
+  ],
+  [
+    "What does the receipt prove?",
+    "The desk checks the signer, staking contract and final execution. It shows an exact NEAR payout when a matching successful transfer receipt is available.",
+  ],
+  [
+    "Can I send recovered funds to Solana?",
+    "On deployments with a Rhea routing credential, request a quote for USDC on Solana. The desk shows the minimum output and wallet actions. Keeping the funds in your NEAR wallet is also an option.",
   ],
 ];
+
 export default function WithdrawalGuide() {
-  const [step, setStep] = useState(0);
-  const reduced = useReducedMotion();
   return (
-    <section className="evidenceGuide" aria-labelledby="evidence-title">
-      <div>
-        <small>READING A POSITION</small>
-        <h2 id="evidence-title">
-          What can I<br />
-          <em>withdraw today?</em>
-        </h2>
-        <p>
-          Shares held, NEAR waiting, and NEAR ready to claim answer different
-          questions. Move through an example withdrawal to see what changes.
-        </p>
-      </div>
-      <div className="stateSheet">
-        <small>ILLUSTRATED WITHDRAWAL</small>
-        <div className="stateRail" aria-label="Withdrawal stages">
-          <motion.i
-            aria-hidden="true"
-            animate={{ scaleX: step / 2 }}
-            transition={{ duration: reduced ? 0 : 0.45 }}
-          />
-          {states.map(([name], n) => (
-            <button
-              key={name}
-              aria-pressed={step === n}
-              onClick={() => setStep(n)}
-            >
-              <b aria-hidden="true">{n + 1}</b>
-              {name}
-            </button>
-          ))}
-        </div>
-        <motion.div
-          key={step}
-          initial={reduced ? false : { y: 7, opacity: 0.6 }}
-          animate={{ y: 0, opacity: 1 }}
-          aria-live="polite"
-        >
-          <h3>{states[step][1]}</h3>
-          <p>{states[step][2]}</p>
-          <small>NEXT ACTION　/　{states[step][3]}</small>
-        </motion.div>
-      </div>
-    </section>
+    <div className="faqList">
+      {questions.map(([question, answer]) => (
+        <details key={question}>
+          <summary>
+            {question}
+            <span aria-hidden="true">+</span>
+          </summary>
+          <p>{answer}</p>
+        </details>
+      ))}
+    </div>
   );
 }

@@ -1,6 +1,6 @@
 {
   "name": "vestiquay",
-  "version": "0.2.0",
+  "version": "0.4.0",
   "private": true,
   "scripts": {
     "dev": "node scripts/preview.mjs",
@@ -8,22 +8,27 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@hot-labs/near-connect": "0.12.0",
+    "@rhea-finance/cross-chain-aggregation-dex": "2.1.9",
+    "@rhea-finance/rnear-sdk": "0.1.1",
+    "motion": "^12.0.0",
     "next": "^15.5.0",
     "react": "^19.0.0",
-    "react-dom": "^19.0.0",
-    "motion": "^12.0.0",
-    "@rhea-finance/rnear-sdk": "0.1.1",
-    "@rhea-finance/cross-chain-aggregation-dex": "latest",
-    "@hot-labs/near-connect": "latest"
+    "react-dom": "^19.0.0"
   },
   "devDependencies": {
-    "typescript": "^5",
+    "@tailwindcss/postcss": "^4",
     "@types/node": "^22",
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "esbuild": "^0.25",
     "tailwindcss": "^4",
-    "@tailwindcss/postcss": "^4"
+    "typescript": "^5"
   },
-  "type": "module"
+  "type": "module",
+  "overrides": {
+    "next": {
+      "postcss": "8.5.32"
+    }
+  }
 }

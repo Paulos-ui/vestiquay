@@ -17,7 +17,7 @@ await read("out");
 await fs.mkdir("dist/server", { recursive: true });
 const src = `import {forwardRhea} from './server/rhea.mjs';
 const assets=${JSON.stringify(assets)};
-const types={html:'text/html; charset=utf-8',js:'application/javascript',css:'text/css',txt:'text/plain',woff2:'font/woff2',ttf:'font/ttf',svg:'image/svg+xml'};
+const types={html:'text/html; charset=utf-8',js:'application/javascript',css:'text/css',txt:'text/plain',woff2:'font/woff2',ttf:'font/ttf',webp:'image/webp',svg:'image/svg+xml'};
 export default {async fetch(req,env){const path=new URL(req.url).pathname;if(path.startsWith('/rhea/'))return forwardRhea(req,env.RHEA_API_KEY);const key=path==='/'?'/index.html':path==='/desk'||path==='/desk/'?'/desk.html':path;const data=assets[key];if(!data||!['GET','HEAD'].includes(req.method))return new Response('Not found',{status:404});const bytes=req.method==='HEAD'?null:Uint8Array.from(atob(data),c=>c.charCodeAt(0));return new Response(bytes,{headers:{'Content-Type':types[key.split('.').pop()]||'application/octet-stream','Cache-Control':key.startsWith('/_next/static/')?'public, max-age=31536000, immutable':'no-cache'}})}}`;
 await build({
   stdin: { contents: src, resolveDir: process.cwd() },

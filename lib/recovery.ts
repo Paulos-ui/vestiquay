@@ -3,15 +3,24 @@ import {
   NearRpcProvider,
   parseNearAmount,
   formatNearAmount,
+  type RawAccountDetails,
 } from "@rhea-finance/rnear-sdk";
 import { NearConnector } from "@hot-labs/near-connect";
-export const stakingContract = "lst.rhealab.near";
+import { isBase58Bytes } from "./addresses";
+import { stakingContract } from "./contracts";
+export { stakingContract } from "./contracts";
+export const wrapContract = "wrap.near";
 const pinnedHash = "EPLT4C61pkVYf5Km6dC4X9x5PMo6rfBwuEwo7vgKpmuv";
-export const rpc = new NearRpcProvider(
-  ["https://rpc.mainnet.near.org", "https://free.rpc.fastnear.com"],
-  12000,
-);
-export const staking = new RNearClient({ network: "mainnet" });
+const rpcUrls = [
+  "https://near.drpc.org",
+  "https://free.rpc.fastnear.com",
+  "https://rpc.mainnet.near.org",
+];
+export const rpc = new NearRpcProvider(rpcUrls, 7000);
+export const staking = new RNearClient({
+  network: "mainnet",
+  config: { rpcUrls, requestTimeoutMs: 7000 },
+});
 let connector: NearConnector | undefined;
 export function accountId(value: string) {
   const id = value.trim();
@@ -22,6 +31,15 @@ export function accountId(value: string) {
   )
     throw Error("Enter a valid NEAR account ID.");
   return id;
+}
+function positiveAmount(value: string, label: string) {
+  if (!/^\d{1,39}(?:\.\d{1,24})?$/.test(value))
+    throw Error(
+      `Enter a positive ${label} amount with up to 24 decimal places.`,
+    );
+  const raw = parseNearAmount(value);
+  if (BigInt(raw) <= 0n) throw Error(`Enter a positive ${label} amount.`);
+  return raw;
 }
 export function nearWallet() {
   return (connector ??= new NearConnector({ network: "mainnet" }));
@@ -40,7 +58,7 @@ export async function inspect(
 ) {
   const id = accountId(input);
   const [position, shares] = await Promise.all([
-    staking.getAccountDetails(id).then((value) => {
+    positionDetails(id).then((value) => {
       onRead?.("withdrawal");
       return value;
     }),
@@ -48,8 +66,41 @@ export async function inspect(
       onRead?.("shares");
       return value;
     }),
-  ]);
+  ]).catch((error: unknown) => {
+    if (
+      error instanceof Error &&
+      ["TimeoutError", "AbortError", "TypeError"].includes(error.name)
+    )
+      throw Error("NEAR RPC did not respond. Retry the position lookup.");
+    throw error;
+  });
   return { id, position, shares, observedAt: Date.now() };
+}
+async function positionDetails(id: string) {
+  try {
+    return await staking.getAccountDetails(id);
+  } catch {
+    // The SDK's epoch estimate uses extra RPC calls. Keep the contract state readable if those fail.
+    const raw = await rpc.viewFunction<RawAccountDetails>(
+      stakingContract,
+      "get_account_details",
+      { account_id: id },
+    );
+    const pending = BigInt(raw.unstaked_balance) >= 10n ** 19n;
+    const pendingRaw = pending ? raw.unstaked_balance : "0";
+    return {
+      accountId: raw.account_id,
+      stakedNear: {
+        raw: raw.staked_balance,
+        amount: formatNearAmount(raw.staked_balance),
+      },
+      pendingNear: { raw: pendingRaw, amount: formatNearAmount(pendingRaw) },
+      canWithdraw: pending && raw.can_withdraw,
+      unstakeAvailableEpochHeight: Number(raw.unstaked_available_epoch_height),
+      estimatedUnlockAtMs: null,
+      raw,
+    };
+  }
 }
 async function checkedContractBlock() {
   const account = await rpc.send<{ code_hash: string; block_height: number }>(
@@ -66,26 +117,24 @@ async function checkedContractBlock() {
 }
 export async function reviewUnstake(id: string, shares: string) {
   id = accountId(id);
-  if (
-    !/^\d+(?:\.\d{1,24})?$/.test(shares) ||
-    BigInt(parseNearAmount(shares)) <= 0n
-  )
-    throw Error("Enter a positive rNEAR amount with up to 24 decimal places.");
+  const sharesRaw = positiveAmount(shares, "rNEAR");
   const [info, block] = await Promise.all([
     inspect(id),
     checkedContractBlock(),
   ]);
-  if (BigInt(parseNearAmount(shares)) > BigInt(info.shares.raw))
+  if (BigInt(sharesRaw) > BigInt(info.shares.raw))
     throw Error("The request exceeds the rNEAR balance.");
   const tx = await staking.buildUnstakeTransaction({
     accountId: id,
     rNearAmount: shares,
   });
   const action = tx.actions[0];
-  const raw = action.params.args.amount;
+  const raw = action?.params.args.amount;
   if (
+    tx.signerId !== id ||
     tx.receiverId !== stakingContract ||
-    action.params.methodName !== "unstake" ||
+    tx.actions.length !== 1 ||
+    action?.params.methodName !== "unstake" ||
     typeof raw !== "string" ||
     BigInt(raw) <= 0n
   )
@@ -95,6 +144,8 @@ export async function reviewUnstake(id: string, shares: string) {
     shares,
     nearAmount: formatNearAmount(raw),
     pending: info.position.pendingNear.raw,
+    canWithdraw: info.position.canWithdraw,
+    unlockEpoch: info.position.unstakeAvailableEpochHeight,
     block,
     tx,
   };
@@ -106,26 +157,17 @@ export async function submitUnstake(
   const fresh = await reviewUnstake(review.id, review.shares);
   if (
     fresh.nearAmount !== review.nearAmount ||
-    fresh.pending !== review.pending
+    fresh.pending !== review.pending ||
+    fresh.canWithdraw !== review.canWithdraw ||
+    fresh.unlockEpoch !== review.unlockEpoch
   )
     throw Error(
-      "The conversion or pending balance changed. Review the request again.",
+      "The conversion or withdrawal state changed. Review the request again.",
     );
-  const results = await wallet.signAndSendTransactions({
-    transactions: [fresh.tx],
-  });
-  if (
-    !results.length ||
-    results.some(
-      (r) => typeof r.status !== "object" || !("SuccessValue" in r.status),
-    )
-  )
-    throw Error(
-      "Unstake was not confirmed. Check wallet activity before retrying.",
-    );
-  return results.map((r) => r.transaction.hash);
+  return submitRecovery(wallet, fresh.tx);
 }
 export async function reviewWithdrawal(id: string) {
+  id = accountId(id);
   const [info, block] = await Promise.all([
     inspect(id),
     checkedContractBlock(),
@@ -135,43 +177,53 @@ export async function reviewWithdrawal(id: string) {
     BigInt(info.position.pendingNear.raw) === 0n
   )
     throw Error("There is no eligible delayed withdrawal for this account.");
-  return {
-    amount: info.position.pendingNear.amount,
-    block,
-    tx: staking.buildWithdrawTransaction({ accountId: id }),
-  };
-}
-export async function withdraw(id: string, expected: string) {
-  const wallet = await walletFor(id),
-    current = await reviewWithdrawal(id);
-  if (current.amount !== expected)
-    throw Error("The position changed. Inspect it again before signing.");
-  const results = await wallet.signAndSendTransactions({
-    transactions: [current.tx],
+  const amount = info.position.pendingNear.amount;
+  const tx = staking.buildWithdrawTransaction({
+    accountId: id,
+    nearAmount: amount,
   });
-  if (!results.length)
-    throw Error(
-      "No wallet outcome returned. Inspect activity before retrying.",
-    );
-  for (const result of results) {
-    if (typeof result.status !== "object" || !("SuccessValue" in result.status))
-      throw Error(
-        "Withdrawal was not confirmed. Inspect wallet activity before retrying.",
-      );
-  }
-  return results.map((r) => r.transaction.hash);
+  if (
+    tx.signerId !== id ||
+    tx.receiverId !== stakingContract ||
+    tx.actions.length !== 1 ||
+    tx.actions[0]?.params.methodName !== "withdraw" ||
+    tx.actions[0].params.args.amount !== info.position.pendingNear.raw
+  )
+    throw Error("The SDK returned an unexpected withdrawal request.");
+  return { id, amount, block, tx };
 }
+export async function withdraw(
+  review: Awaited<ReturnType<typeof reviewWithdrawal>>,
+) {
+  const wallet = await walletFor(review.id);
+  const current = await reviewWithdrawal(review.id);
+  if (current.amount !== review.amount)
+    throw Error("The position changed. Inspect it again before signing.");
+  return submitRecovery(wallet, current.tx);
+}
+
+async function submitRecovery(
+  wallet: Awaited<ReturnType<typeof walletFor>>,
+  tx: ReturnType<RNearClient["buildWithdrawTransaction"]>,
+) {
+  const results = await wallet.signAndSendTransactions({ transactions: [tx] });
+  const hash = results[0]?.transaction?.hash;
+  if (!hash || !isBase58Bytes(hash, 32))
+    throw Error(
+      "The wallet returned no transaction hash. Check its activity before retrying. You can verify the hash in Receipts.",
+    );
+  return hash;
+}
+
 export async function wrapPreview(id: string, human: string) {
-  const { parseNearAmount, formatNearAmount } =
-    await import("@rhea-finance/rnear-sdk");
-  const value = BigInt(parseNearAmount(human));
-  if (value <= 0n) throw Error("Enter a positive amount to wrap.");
+  id = accountId(id);
+  const value = BigInt(positiveAmount(human, "NEAR"));
   const [registration, bounds, liquid] = await Promise.all([
-    rpc.viewFunction<unknown>("wrap.near", "storage_balance_of", {
+    rpc.viewFunction<unknown>(wrapContract, "storage_balance_of", {
       account_id: id,
     }),
     rpc.viewFunction<{ min: string }>(
-      "wrap.near",
+      wrapContract,
       "storage_balance_bounds",
       {},
     ),
@@ -205,7 +257,7 @@ export async function wrapPreview(id: string, human: string) {
   return {
     storage: formatNearAmount(storage),
     amount: human,
-    tx: { signerId: id, receiverId: "wrap.near", actions },
+    tx: { signerId: id, receiverId: wrapContract, actions },
   };
 }
 export async function wrap(
@@ -223,7 +275,10 @@ export async function wrap(
   if (
     !outcomes.length ||
     outcomes.some(
-      (o) => typeof o.status !== "object" || !("SuccessValue" in o.status),
+      (o) =>
+        !o.status ||
+        typeof o.status !== "object" ||
+        !("SuccessValue" in o.status),
     )
   )
     throw Error("Wrap was not confirmed. Check your wallet activity.");

@@ -1,11 +1,14 @@
 import {
   type ChainExecutor,
+  type NearTransaction,
   SwapClient,
   parseUnits,
   formatUnits,
 } from "@rhea-finance/cross-chain-aggregation-dex";
 import { createNearExecutor } from "@rhea-finance/cross-chain-aggregation-dex/executors/near";
-import { rpc, walletFor, accountId } from "./recovery";
+import { rpc, walletFor, accountId, wrapContract } from "./recovery";
+import { isBase58Bytes } from "./addresses";
+import { verifyNearSource, type NearExecution } from "./receipts";
 export { formatUnits };
 const baseUrl =
   process.env.NEXT_PUBLIC_RHEA_PROXY !== "0" &&
@@ -26,40 +29,100 @@ export type RouteReceipt = {
   recordId?: string;
   txHashes: string[];
   destinationTx?: string;
+  sourceStatus?: NearExecution;
 };
 export const receiptKey = "vestiquay.route.v2";
+const usdcMint = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
+const solanaUsdcAsset =
+  "nep141:sol-5ce3bf3a31af18be40ba30f721101b4341690186.omft.near";
+const decimal = /^\d{1,39}(?:\.\d{1,24})?$/;
+
+export async function routingConfigured() {
+  const result = await fetch("/rhea/availability", {
+    cache: "no-store",
+    signal: AbortSignal.timeout(7000),
+  });
+  if (!result.ok) throw Error("Could not check Rhea routing access.");
+  const data = await result.json();
+  if (typeof data.configured !== "boolean")
+    throw Error("Could not check Rhea routing access.");
+  return data.configured as boolean;
+}
+
 export function validateReceipt(value: unknown): RouteReceipt {
-  const r = value as RouteReceipt;
+  const r = value as Partial<RouteReceipt> | null;
   if (
     !r ||
     typeof r.sender !== "string" ||
     typeof r.recipient !== "string" ||
+    !isBase58Bytes(r.recipient, 32) ||
     typeof r.status !== "string" ||
+    r.status.length > 100 ||
     !Array.isArray(r.txHashes) ||
-    !r.txHashes.every((v) => typeof v === "string") ||
+    r.txHashes.length > 12 ||
+    !r.txHashes.every((v) => typeof v === "string" && isBase58Bytes(v, 32)) ||
     typeof r.created !== "number" ||
+    !Number.isFinite(r.created) ||
     typeof r.minimum !== "string" ||
+    !decimal.test(r.minimum) ||
     typeof r.input !== "string" ||
-    typeof r.asset !== "string"
+    !decimal.test(r.input) ||
+    (r.asset !== "NEAR" && r.asset !== "wNEAR") ||
+    [r.recordId, r.orderId, r.router].some(
+      (item) =>
+        item !== undefined && (typeof item !== "string" || item.length > 256),
+    ) ||
+    (r.destinationTx !== undefined &&
+      (typeof r.destinationTx !== "string" ||
+        !isBase58Bytes(r.destinationTx, 64)))
   )
-    throw Error("This file is not a Vestiquay route receipt.");
-  return r;
+    throw Error("Choose a valid Vestiquay route receipt.");
+  const {
+    sender,
+    recipient,
+    status,
+    txHashes,
+    created,
+    minimum,
+    input,
+    asset,
+    recordId,
+    orderId,
+    router,
+    destinationTx,
+  } = r;
+  return {
+    sender: accountId(sender),
+    recipient,
+    status,
+    txHashes,
+    created,
+    minimum,
+    input,
+    asset,
+    recordId,
+    orderId,
+    router,
+    destinationTx,
+  };
 }
-function client() {
+function makeClient() {
   return new SwapClient({ baseUrl, timeoutMs: 20000 });
 }
+let publicClient: SwapClient | undefined;
+function client() {
+  return (publicClient ??= makeClient());
+}
+
 export async function quoteRoute(
   sender: string,
   recipient: string,
   amount: string,
 ) {
-  accountId(sender);
-  if (!/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(recipient))
+  sender = accountId(sender);
+  if (!isBase58Bytes(recipient, 32))
     throw Error("Enter a Solana destination address.");
-  if (
-    !/^\d+(\.\d{1,24})?$/.test(amount) ||
-    BigInt(parseUnits(amount, 24)) <= 0n
-  )
+  if (!decimal.test(amount) || BigInt(parseUnits(amount, 24)) <= 0n)
     throw Error("Enter a positive source amount.");
   const c = client(),
     [from, to] = await Promise.all([
@@ -70,22 +133,25 @@ export async function quoteRoute(
     from.find((a) => a.isNative && a.symbol.toUpperCase() === "NEAR") ??
     from.find(
       (a) =>
-        a.assetId === "nep141:wrap.near" ||
-        a.contractAddress === "wrap.near" ||
-        a.address === "wrap.near",
+        a.assetId === "nep141:" + wrapContract ||
+        a.contractAddress === wrapContract ||
+        a.address === wrapContract,
     );
   const tokenOut =
     to.find(
       (a) =>
         a.symbol === "USDC" &&
-        a.contractAddress === "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+        a.decimals === 6 &&
+        a.contractAddress === usdcMint,
     ) ??
     to.find(
       (a) =>
-        a.assetId ===
-        "nep141:sol-5ce3bf3a31af18be40ba30f721101b4341690186.omft.near",
+        a.symbol === "USDC" &&
+        a.decimals === 6 &&
+        a.contractAddress == null &&
+        a.assetId === solanaUsdcAsset,
     );
-  if (!tokenIn || !tokenOut)
+  if (!tokenIn || tokenIn.decimals !== 24 || !tokenOut)
     throw Error("Rhea currently lists no matching NEAR / Solana USDC assets.");
   const q = await c.quote({
     fromChain: "near",
@@ -104,19 +170,127 @@ export async function quoteRoute(
     sender,
     recipient,
     amount,
+    expiresAt: Math.min(q.expiresAt ?? Infinity, q.receivedAt + 90_000),
+    executionKey: crypto.randomUUID(),
   };
 }
+
+export function assertQuoteActive(
+  plan: Awaited<ReturnType<typeof quoteRoute>>,
+) {
+  if (Date.now() >= plan.expiresAt)
+    throw Error("This quote expired. Request a fresh quote before signing.");
+}
+
+function checkRouteActions(
+  txs: NearTransaction[],
+  signer: string,
+  symbol: string,
+  amount: string,
+) {
+  let source = 0n;
+  let attached = 0n;
+  for (const tx of txs) {
+    accountId(tx.receiverId);
+    if (tx.signerId && tx.signerId !== signer)
+      throw Error("Rhea returned a transaction for a different signer.");
+    for (const raw of tx.actions) {
+      const action = raw as {
+        type: string;
+        params: Record<string, unknown>;
+      } | null;
+      if (
+        !action ||
+        !action.params ||
+        !["FunctionCall", "Transfer"].includes(action.type) ||
+        typeof action.params.deposit !== "string" ||
+        !/^\d{1,39}$/.test(action.params.deposit)
+      )
+        throw Error("Rhea returned an unsupported wallet action.");
+      const deposit = BigInt(action.params.deposit);
+      attached += deposit;
+      if (symbol === "NEAR") {
+        if (
+          action.type === "Transfer" ||
+          action.params.methodName === "near_deposit"
+        )
+          source += deposit;
+        continue;
+      }
+      if (
+        tx.receiverId !== wrapContract ||
+        !["ft_transfer", "ft_transfer_call"].includes(
+          String(action.params.methodName),
+        )
+      )
+        continue;
+      const args = action.params.args as { amount?: unknown } | undefined;
+      if (typeof args?.amount !== "string" || !/^\d{1,39}$/.test(args.amount))
+        throw Error("Rhea returned an invalid wrapped NEAR amount.");
+      source += BigInt(args.amount);
+    }
+  }
+  if (source !== BigInt(amount))
+    throw Error(
+      "The wallet actions spend a different source amount. Request a fresh quote.",
+    );
+  return {
+    attachedNear: formatUnits(
+      (attached - (symbol === "NEAR" ? source : 0n)).toString(),
+      24,
+    ),
+    receivers: [...new Set(txs.map((tx) => tx.receiverId))],
+  };
+}
+
+export async function prepareRoute(
+  plan: Awaited<ReturnType<typeof quoteRoute>>,
+) {
+  assertQuoteActive(plan);
+  const { q } = plan;
+  const build = await client().buildSwap({
+    quote: q,
+    idempotencyKey: plan.executionKey,
+  });
+  const quotedInput = q.tokenIn.isNative
+    ? [q.tokenIn.address, String(q.buildContext.request.tokenIn)]
+    : [q.tokenIn.address, wrapContract, "nep141:" + wrapContract];
+  if (
+    build.execution.kind !== "near-transaction-batch" ||
+    !build.isCrossChain ||
+    build.fromChain !== "near" ||
+    build.toChain !== "solana" ||
+    build.tokenIn.decimals !== 24 ||
+    !quotedInput.includes(build.tokenIn.address) ||
+    build.tokenOut.decimals !== 6 ||
+    ![usdcMint, solanaUsdcAsset].includes(build.tokenOut.address) ||
+    build.amountIn !== q.amountIn ||
+    BigInt(build.minAmountOut) < BigInt(q.minAmountOut)
+  )
+    throw Error(
+      "Rhea returned different transfer terms. Request a fresh quote.",
+    );
+  const summary = checkRouteActions(
+    build.execution.transactions,
+    plan.sender,
+    plan.symbol,
+    q.amountIn,
+  );
+  assertQuoteActive(plan);
+  return { build, ...summary };
+}
+
 export async function executeRoute(
   plan: Awaited<ReturnType<typeof quoteRoute>>,
+  prepared: Awaited<ReturnType<typeof prepareRoute>>,
   save: (r: RouteReceipt) => void,
 ) {
   const { q, sender, recipient, amount, symbol } = plan;
-  if (q.expiresAt && Date.now() >= q.expiresAt)
-    throw Error("Quote expired. Request a fresh quote.");
-  const wallet = await walletFor(sender);
+  const { build } = prepared;
+  assertQuoteActive(plan);
   if (symbol === "wNEAR") {
     const balance = await rpc.viewFunction<string>(
-      "wrap.near",
+      wrapContract,
       "ft_balance_of",
       { account_id: sender },
     );
@@ -125,6 +299,8 @@ export async function executeRoute(
         "This route spends wNEAR. Wrap NEAR before sending, then refresh the quote.",
       );
   }
+  assertQuoteActive(plan);
+  const wallet = await walletFor(sender);
   let receipt: RouteReceipt = {
     sender,
     recipient,
@@ -134,23 +310,49 @@ export async function executeRoute(
     created: Date.now(),
     status: "awaiting wallet confirmation",
     txHashes: [],
-    router: q.route.router,
+    router: build.order?.router ?? build.router,
+    orderId: build.order?.orderId,
   };
   const executor = createNearExecutor({
     getChain: () => "near",
     async signAndSendTransactions(txs) {
-      save(receipt);
+      assertQuoteActive(plan);
       type Transactions = Parameters<
         typeof wallet.signAndSendTransactions
       >[0]["transactions"];
-      const outcomes = await wallet.signAndSendTransactions({
-        transactions: txs as Transactions,
-      });
-      const hashes = outcomes.map((r) => r.transaction.hash);
-      if (!hashes.length)
-        throw Error("No source transaction returned. Check wallet activity.");
-      receipt = { ...receipt, txHashes: hashes, status: "source submitted" };
-      save(receipt);
+      const outcomes = await wallet
+        .signAndSendTransactions({
+          transactions: txs.map((tx) => ({
+            ...tx,
+            signerId: sender,
+          })) as Transactions,
+        })
+        .catch(() => {
+          throw Error(
+            "The wallet did not return a result. Check wallet activity before sending again.",
+          );
+        });
+      const hashes = outcomes
+        .map((r) => r.transaction?.hash)
+        .filter(
+          (hash): hash is string =>
+            typeof hash === "string" && isBase58Bytes(hash, 32),
+        );
+      const failed = outcomes.some(
+        (o) =>
+          o.status && typeof o.status === "object" && "Failure" in o.status,
+      );
+      receipt = {
+        ...receipt,
+        txHashes: hashes,
+        status: failed ? "source transaction failed" : "source submitted",
+        sourceStatus: failed ? "failed" : "pending",
+      };
+      if (hashes.length) save(receipt);
+      if (!hashes.length || hashes.length !== txs.length || failed)
+        throw Error(
+          "The source submission did not complete. Check the transaction hashes and wallet activity before retrying.",
+        );
       return { txHashes: hashes, raw: outcomes };
     },
     async waitForTransactions(hashes) {
@@ -166,22 +368,31 @@ export async function executeRoute(
       return { status: "confirmed" };
     },
   });
-  const result = await new SwapClient({
+  const swap = new SwapClient({
     baseUrl,
+    timeoutMs: 20000,
     executors: [executor as ChainExecutor],
-  }).swap({
-    quote: q,
-    waitFor: "submitted",
-    idempotencyKey: crypto.randomUUID(),
   });
+  let result;
+  try {
+    result = await swap.executeSwap({ build, waitFor: "submitted" });
+  } catch (error) {
+    if (receipt.txHashes.length)
+      throw Error(
+        "A source transaction was recorded. Open Receipts and check its status before retrying.",
+      );
+    if (error instanceof Error && error.cause instanceof Error)
+      throw error.cause;
+    throw error;
+  }
   receipt = {
     ...receipt,
     status: result.status,
-    router: result.router,
-    orderId: result.orderId,
-    recordId: result.report?.recordId
-      ? String(result.report.recordId)
-      : undefined,
+    orderId: result.orderId ?? receipt.orderId,
+    recordId:
+      result.report?.recordId != null
+        ? String(result.report.recordId)
+        : undefined,
     txHashes:
       result.txHashes ?? (result.txHash ? [result.txHash] : receipt.txHashes),
   };
@@ -202,8 +413,23 @@ export async function refreshReceipt(r: RouteReceipt) {
   return {
     ...r,
     status: s.status,
-    destinationTx: typeof dest === "string" ? dest : r.destinationTx,
+    destinationTx:
+      typeof dest === "string" && isBase58Bytes(dest, 64) ? dest : undefined,
   };
+}
+
+export async function refreshRouteSource(receipt: RouteReceipt) {
+  if (!receipt.txHashes.length)
+    throw Error("This receipt has no NEAR transaction hash.");
+  const checks = await Promise.all(
+    receipt.txHashes.map((hash) => verifyNearSource(receipt.sender, hash)),
+  );
+  const sourceStatus: NearExecution = checks.includes("failed")
+    ? "failed"
+    : checks.every((item) => item === "confirmed")
+      ? "confirmed"
+      : "pending";
+  return { ...receipt, sourceStatus };
 }
 export function download(name: string, data: string) {
   const url = URL.createObjectURL(

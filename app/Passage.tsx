@@ -1,72 +1,112 @@
 "use client";
 import { useState } from "react";
-const stages = [
+import { motion, useReducedMotion } from "motion/react";
+import Icon, { type IconName } from "./Icon";
+
+const stages: {
+  label: string;
+  icon: IconName;
+  title: string;
+  body: string;
+  evidence: [string, string][];
+  action: string;
+  href: string;
+}[] = [
   {
-    name: "Position",
-    title: "Find the account that holds your stake.",
-    copy: "Enter a public NEAR account to read its rNEAR shares, pending NEAR and withdrawal eligibility. You can inspect a position before connecting a wallet.",
-    fields: [
+    label: "Inspect",
+    icon: "search",
+    title: "See what the contract holds.",
+    body: "Enter a public NEAR account to see its rNEAR balance, NEAR pending and withdrawal eligibility.",
+    evidence: [
       ["Source", "Rhea staking contract"],
-      ["Read", "Shares & pending NEAR"],
-      ["Wallet signature", "None required"],
+      ["Signing", "Public read"],
     ],
+    action: "Inspect a public position",
+    href: "/desk?account=lp.ref-labs.near",
   },
   {
-    name: "Route",
-    title: "Decide where the proceeds should land.",
-    copy: "After withdrawing, keep NEAR in your wallet or ask Rhea for a route to USDC on Solana. Compare expected and minimum output, then review the recipient before signing.",
-    fields: [
-      ["Source", "NEAR / wrapped NEAR"],
-      ["Destination", "USDC on Solana"],
-      ["Review", "Minimum output"],
+    label: "Unstake",
+    icon: "layers",
+    title: "Put a withdrawal in motion.",
+    body: "Review how much rNEAR to unstake and the estimated NEAR amount. The wallet owner approves the request and the contract queues the withdrawal.",
+    evidence: [
+      ["Input", "rNEAR shares"],
+      ["Signing", "Owner’s NEAR wallet"],
     ],
+    action: "Review a position",
+    href: "/desk",
   },
   {
-    name: "Receipt",
-    title: "Follow the transfer after you sign.",
-    copy: "Keep the source transaction and Rhea order together. Refresh the order to check delivery, or export the receipt and reopen it on another device.",
-    fields: [
-      ["Source evidence", "Transaction hash"],
-      ["Route evidence", "Rhea order ID"],
-      ["Portable copy", "JSON receipt"],
+    label: "Claim",
+    icon: "lock",
+    title: "Bring unlocked NEAR back.",
+    body: "Once the contract confirms eligibility, review the exact claim amount and sign. The transfer goes to the signing account.",
+    evidence: [
+      ["Eligibility", "Checked onchain"],
+      ["Destination", "Signing NEAR account"],
     ],
+    action: "Check eligibility",
+    href: "/desk",
+  },
+  {
+    label: "Verify",
+    icon: "receipt",
+    title: "See the payout onchain.",
+    body: "Check the final transaction and its transfer receipt. Export the account and hash to verify them from another device or the independent client.",
+    evidence: [
+      ["Execution", "NEAR finality"],
+      ["Payout", "Matching transfer receipt"],
+    ],
+    action: "Verify a historical withdrawal",
+    href: "/desk?tab=Receipt&proof=example",
   },
 ];
+
 export default function Passage() {
-  const [index, select] = useState(0),
-    stage = stages[index];
+  const [index, select] = useState(0);
+  const reduced = useReducedMotion();
+  const stage = stages[index];
+
   return (
-    <section className="passage" id="recovery">
-      <small>THE RECOVERY WORKFLOW</small>
-      <h2>One position, three decisions.</h2>
-      <div className="passControls" aria-label="Explore recovery stages">
-        {stages.map((s, n) => (
+    <div className="passageControl">
+      <div className="passageTabs" aria-label="Recovery workflow">
+        {stages.map(({ label, icon }, i) => (
           <button
-            key={s.name}
-            aria-pressed={n === index}
-            onClick={() => select(n)}
+            key={label}
+            type="button"
+            aria-pressed={index === i}
+            onClick={() => select(i)}
           >
-            {s.name}
+            <Icon name={icon} />
+            <span>{label}</span>
           </button>
         ))}
       </div>
-      <div className={"passContent stage" + index}>
-        <div>
-          <h3>{stage.title}</h3>
-          <p>{stage.copy}</p>
-          <a href={"/desk?tab=" + stage.name}>
-            Open {stage.name.toLowerCase()} ↗
-          </a>
+      <motion.div
+        className="passageReadout"
+        key={stage.label}
+        initial={reduced ? false : { opacity: 0.55, y: 7 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.28 }}
+        aria-live="polite"
+      >
+        <div className="passageIcon">
+          <Icon name={stage.icon} />
         </div>
+        <h3>{stage.title}</h3>
+        <p>{stage.body}</p>
         <dl>
-          {stage.fields.map(([k, v]) => (
-            <div key={k}>
-              <dt>{k}</dt>
-              <dd>{v}</dd>
+          {stage.evidence.map(([label, value]) => (
+            <div key={label}>
+              <dt>{label}</dt>
+              <dd>{value}</dd>
             </div>
           ))}
         </dl>
-      </div>
-    </section>
+        <a className="inlineLink" href={stage.href}>
+          {stage.action} <Icon name="diagonal" />
+        </a>
+      </motion.div>
+    </div>
   );
 }

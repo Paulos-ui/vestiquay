@@ -11,35 +11,36 @@ const routes = new Map([
 export async function forwardRhea(req, secret) {
   const url = new URL(req.url),
     path = url.pathname.slice("/rhea".length);
-  if (routes.get(path) !== req.method)
+  if (req.method === "GET" && path === "/availability")
     return Response.json(
-      { message: "Unknown Rhea operation" },
-      { status: 404 },
+      { configured: Boolean(secret?.trim()) },
+      { headers: { "Cache-Control": "no-store" } },
     );
+  if (routes.get(path) !== req.method)
+    return Response.json({ msg: "Unknown Rhea operation" }, { status: 404 });
   if (
     req.method === "POST" &&
     req.headers.get("Origin") &&
     req.headers.get("Origin") !== url.origin
   )
-    return new Response("Origin rejected", { status: 403 });
+    return Response.json({ msg: "Origin rejected." }, { status: 403 });
   const catalog =
     path === "/get_chain_prices" || path === "/api/swap/supported_to_tokens";
-  if (!catalog && !secret)
+  if (!catalog && !secret?.trim())
     return Response.json(
       {
-        message:
-          "Rhea API access is pending. The staking inspector and NEAR withdrawal remain available.",
+        msg: "Rhea routing is unavailable on this deployment. You can still recover NEAR.",
       },
       { status: 503 },
     );
   let body;
   if (req.method === "POST") {
     body = await req.text();
-    if (body.length > 131072)
-      return new Response("Request too large", { status: 413 });
+    if (new TextEncoder().encode(body).length > 131072)
+      return Response.json({ msg: "Request too large." }, { status: 413 });
   }
   const headers = { "Content-Type": "application/json" };
-  if (secret) headers.Authorization = "Bearer " + secret;
+  if (!catalog) headers.Authorization = "Bearer " + secret.trim();
   const id = req.headers.get("Idempotency-Key");
   if (id) headers["Idempotency-Key"] = id;
   try {
@@ -50,6 +51,13 @@ export async function forwardRhea(req, secret) {
       signal: AbortSignal.timeout(20000),
       redirect: "error",
     });
+    if (r.status === 401 || r.status === 403)
+      return Response.json(
+        {
+          msg: "Rhea rejected the routing credential. NEAR recovery is still available.",
+        },
+        { status: r.status, headers: { "Cache-Control": "no-store" } },
+      );
     return new Response(r.body, {
       status: r.status,
       headers: {
@@ -59,7 +67,7 @@ export async function forwardRhea(req, secret) {
     });
   } catch {
     return Response.json(
-      { message: "Rhea is temporarily unreachable." },
+      { msg: "Rhea is temporarily unreachable." },
       { status: 502 },
     );
   }
