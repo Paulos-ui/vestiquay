@@ -1,4 +1,6 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { formatNearAmount } from "@rhea-finance/rnear-sdk";
+import { replayWithdrawal } from "../lib/exit-plan";
 import {
   nearExplorer,
   parseRecoveryReceipt,
@@ -16,6 +18,8 @@ type Props = {
   evidence?: RecoveryEvidence;
   run: (work: () => Promise<void>) => void;
   verify: (record: Receipt) => Promise<void>;
+  shareable: boolean;
+  onRoute?: () => void;
 };
 
 export default function RecoveryReceipt({
@@ -25,10 +29,57 @@ export default function RecoveryReceipt({
   evidence,
   run,
   verify,
+  shareable,
+  onRoute,
 }: Props) {
   const [account, setAccount] = useState(record?.account ?? "");
   const [hash, setHash] = useState(record?.hash ?? "");
+  const [share, setShare] = useState<{
+    key: string;
+    copied: boolean;
+    url: string;
+  }>();
+  const [replay, setReplay] = useState<{
+    receiptHash: string;
+    checkedAt: number;
+    data: Awaited<ReturnType<typeof replayWithdrawal>>;
+  }>();
   const status = evidence?.execution;
+  const comparison =
+    replay &&
+    replay.receiptHash === record?.hash &&
+    replay.checkedAt === evidence?.checkedAt
+      ? replay.data
+      : undefined;
+  const replayHeading = useRef<HTMLHeadingElement>(null);
+  const shareKey = record && record.account + ":" + record.hash;
+  const activeShare = share && share.key === shareKey ? share : undefined;
+
+  async function copyProof(receipt: Receipt) {
+    const url = new URL("/desk", location.origin);
+    url.search = new URLSearchParams({
+      tab: "Receipt",
+      account: receipt.account,
+      proof: receipt.hash,
+    }).toString();
+    let copied = false;
+    try {
+      await navigator.clipboard.writeText(url.href);
+      copied = true;
+    } catch {}
+    setShare({
+      key: receipt.account + ":" + receipt.hash,
+      copied,
+      url: url.href,
+    });
+  }
+
+  useEffect(() => {
+    if (!comparison) return;
+    const heading = replayHeading.current;
+    heading?.focus({ preventScroll: true });
+    heading?.scrollIntoView({ block: "center" });
+  }, [comparison]);
 
   return (
     <>
@@ -126,7 +177,26 @@ export default function RecoveryReceipt({
               </p>
             )}
           <div className="deskActions">
+            {evidence?.payout && evidence.claimBlockHash && (
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() =>
+                  run(async () => {
+                    const data = await replayWithdrawal(record, evidence);
+                    setReplay({
+                      receiptHash: record.hash,
+                      checkedAt: evidence.checkedAt,
+                      data,
+                    });
+                  })
+                }
+              >
+                Replay claim on NEAR
+              </button>
+            )}
             <button
+              className="minor"
               type="button"
               disabled={busy}
               onClick={() => run(() => verify(record))}
@@ -145,8 +215,99 @@ export default function RecoveryReceipt({
             >
               Export JSON ↓
             </button>
+            {shareable && status === "confirmed" && (
+              <button
+                className="minor"
+                type="button"
+                disabled={busy}
+                onClick={() => {
+                  void copyProof(record);
+                }}
+              >
+                Copy proof link
+              </button>
+            )}
+            {onRoute && (
+              <button
+                className="minor"
+                type="button"
+                disabled={busy}
+                onClick={onRoute}
+              >
+                Route this payout to Solana
+              </button>
+            )}
           </div>
+          {activeShare &&
+            (activeShare.copied ? (
+              <p role="status">Proof link copied</p>
+            ) : (
+              <label className="proofShare">
+                Proof link
+                <input
+                  readOnly
+                  value={activeShare.url}
+                  onFocus={(event) => event.currentTarget.select()}
+                />
+              </label>
+            ))}
         </article>
+      )}
+      {comparison && (
+        <section
+          className="replayProof"
+          aria-label="Claim replay"
+          aria-live="polite"
+        >
+          <div className="proofHeading">
+            <h3 tabIndex={-1} ref={replayHeading}>
+              Claim replay
+            </h3>
+            <span
+              className="evidenceTag"
+              data-state={comparison.reconciled ? "confirmed" : "pending"}
+            >
+              {comparison.reconciled
+                ? "Payout reconciled"
+                : "Amounts did not reconcile"}
+            </span>
+          </div>
+          <dl className="proofDetails">
+            <div>
+              <dt>Pending before claim</dt>
+              <dd>
+                {formatNearAmount(comparison.before.pending)} NEAR
+                <br />
+                <a
+                  href={`https://nearblocks.io/blocks/${comparison.before.hash}`}
+                >
+                  Block {comparison.before.height.toLocaleString()}
+                </a>
+              </dd>
+            </div>
+            <div>
+              <dt>Pending after claim</dt>
+              <dd>
+                {formatNearAmount(comparison.after.pending)} NEAR
+                <br />
+                <a
+                  href={`https://nearblocks.io/blocks/${comparison.after.hash}`}
+                >
+                  Block {comparison.after.height.toLocaleString()}
+                </a>
+              </dd>
+            </div>
+            <div className="payout">
+              <dt>Wallet transfer</dt>
+              <dd>{comparison.payout} NEAR</dd>
+            </div>
+          </dl>
+          <p>
+            {comparison.reconciled
+              ? "The decrease in the pending balance matches the wallet transfer in the transaction receipt."
+              : "The staking snapshots and the transfer receipt give different amounts. Review the two blocks and the transaction before relying on this comparison."}
+          </p>
+        </section>
       )}
       <form
         className="proofForm"

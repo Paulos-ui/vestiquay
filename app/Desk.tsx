@@ -1,5 +1,6 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
+import { parseUnits } from "@rhea-finance/cross-chain-aggregation-dex";
 import {
   inspect,
   nearWallet,
@@ -7,21 +8,15 @@ import {
   submitUnstake,
   reviewWithdrawal,
   withdraw,
-  wrapPreview,
-  wrap,
   stakingContract,
 } from "../lib/recovery";
 import {
-  quoteRoute,
-  prepareRoute,
-  executeRoute,
   refreshReceipt,
   refreshRouteSource,
   download,
   receiptKey,
   validateReceipt,
   formatUnits,
-  routingConfigured,
   type RouteReceipt,
 } from "../lib/routes";
 import {
@@ -34,7 +29,15 @@ import {
   type RecoveryEvidence,
   type RecoveryReceipt as RecoveryRecord,
 } from "../lib/receipts";
+import { refreshIntentReceipt } from "../lib/intents";
+import { verifySolanaDelivery } from "../lib/solana";
+import {
+  solanaDestinations,
+  type SolanaDestination,
+} from "../lib/route-assets";
 import Brand from "./Brand";
+import RecoveryAgent from "./RecoveryAgent";
+import RouteDesk from "./RouteDesk";
 import Icon, { type IconName } from "./Icon";
 import RecoveryPath from "./RecoveryPath";
 import RecoveryReceipt from "./RecoveryReceipt";
@@ -58,7 +61,7 @@ const pageContent: Record<
   Route: {
     heading: "Route to Solana",
     description:
-      "Review a Rhea quote and the wallet actions for receiving USDC on Solana.",
+      "Send NEAR from your wallet and receive USDC or native SOL on Solana.",
     icon: "route",
     label: "Route",
   },
@@ -73,18 +76,22 @@ const pageContent: Record<
 export default function Desk({ hosted = false }: { hosted?: boolean }) {
   const [tab, setTab] = useState<View>("Position"),
     [account, id] = useState(""),
-    [amount, setAmount] = useState("1"),
-    [recipient, setRecipient] = useState(""),
     [busy, setBusy] = useState(false),
     [msg, setMsg] = useState("");
-  const [pos, setPos] = useState<Awaited<ReturnType<typeof inspect>>>(),
-    [review, setReview] =
-      useState<Awaited<ReturnType<typeof reviewWithdrawal>>>(),
-    [plan, setPlan] = useState<Awaited<ReturnType<typeof quoteRoute>>>(),
-    [receipt, setReceipt] = useState<RouteReceipt>();
-  const [wr, setWr] = useState<Awaited<ReturnType<typeof wrapPreview>>>();
-  const [prepared, setPrepared] =
-    useState<Awaited<ReturnType<typeof prepareRoute>>>();
+  const [pos, setPos] = useState<Awaited<ReturnType<typeof inspect>>>();
+  const [review, setReview] =
+    useState<Awaited<ReturnType<typeof reviewWithdrawal>>>();
+  const [receipt, setReceipt] = useState<RouteReceipt>();
+  const [routeAmount, setRouteAmount] = useState<string>();
+  const [delivery, setDelivery] = useState<{
+    signature: string;
+    recipient: string;
+    output: SolanaDestination;
+    minimum: string;
+    amount: string;
+    slot: number;
+  }>();
+  const receiptAsset = solanaDestinations[receipt?.output ?? "USDC"];
   const [sharesInput, setSharesInput] = useState("");
   const [unstakePlan, setUnstakePlan] =
     useState<Awaited<ReturnType<typeof reviewUnstake>>>();
@@ -98,10 +105,6 @@ export default function Desk({ hosted = false }: { hosted?: boolean }) {
   const [savedRecovery, setSavedRecovery] = useState<RecoveryRecord>();
   const [evidence, setEvidence] = useState<RecoveryEvidence>();
   const [receiptType, setReceiptType] = useState<ReceiptType>("recovery");
-  const [routing, setRouting] = useState<
-    "checking" | "ready" | "unavailable" | "error"
-  >("checking");
-  const [now, setNow] = useState(0);
   const inspection = useRef(0);
   const panelHeading = useRef<HTMLHeadingElement>(null);
   const actionReview = useRef<HTMLElement>(null);
@@ -109,28 +112,6 @@ export default function Desk({ hosted = false }: { hosted?: boolean }) {
   const canConnect =
     hosted ||
     (typeof location !== "undefined" && location.protocol !== "file:");
-  useEffect(() => {
-    if (!hosted || tab !== "Route") return;
-    let active = true;
-    setRouting("checking");
-    routingConfigured().then(
-      (configured) => {
-        if (active) setRouting(configured ? "ready" : "unavailable");
-      },
-      () => {
-        if (active) setRouting("error");
-      },
-    );
-    return () => {
-      active = false;
-    };
-  }, [hosted, tab]);
-  useEffect(() => {
-    if (!plan) return;
-    setNow(Date.now());
-    const clock = window.setInterval(() => setNow(Date.now()), 1000);
-    return () => window.clearInterval(clock);
-  }, [plan]);
   useEffect(() => {
     if (!canConnect) return;
     let active = true;
@@ -211,12 +192,17 @@ export default function Desk({ hosted = false }: { hosted?: boolean }) {
         setRecord(previous);
       }
     } catch {}
-    if (view === "Receipt" && params.get("proof") === "example") {
-      act(() =>
-        checkRecovery(
-          recoveryReceipt(publicRecovery.account, publicRecovery.hash),
-        ),
-      );
+    if (view === "Receipt" && params.get("receipt") !== "route") {
+      const proof = params.get("proof");
+      if (proof === "example") {
+        act(() =>
+          checkRecovery(
+            recoveryReceipt(publicRecovery.account, publicRecovery.hash),
+          ),
+        );
+      } else if (proof && initial) {
+        act(() => checkRecovery(recoveryReceipt(initial, proof)));
+      }
     }
   }, []);
   function remember(key: string, value: unknown) {
@@ -231,6 +217,37 @@ export default function Desk({ hosted = false }: { hosted?: boolean }) {
   function saveRoute(r: RouteReceipt) {
     setReceipt(r);
     remember(receiptKey, r);
+  }
+  function runDeliveryCheck(route: RouteReceipt) {
+    act(async () => {
+      setDelivery(undefined);
+      const current =
+        route.provider === "intents"
+          ? await refreshIntentReceipt(route)
+          : hosted && (route.recordId || route.orderId)
+            ? await refreshReceipt(route)
+            : route;
+      if (current !== route) saveRoute(current);
+      const signature = current.destinationTx;
+      if (!signature)
+        throw Error("The provider has not returned a Solana transaction.");
+      const recipient = current.recipient;
+      const output = current.output ?? "USDC";
+      setDelivery({
+        signature,
+        recipient,
+        output,
+        minimum: current.minimum,
+        ...(await verifySolanaDelivery(
+          signature,
+          recipient,
+          output,
+          current.provider === "intents"
+            ? parseUnits(current.minimum, solanaDestinations[output].decimals)
+            : undefined,
+        )),
+      });
+    });
   }
   async function checkRecovery(r: RecoveryRecord) {
     const next = await verifyRecovery(r);
@@ -265,16 +282,32 @@ export default function Desk({ hosted = false }: { hosted?: boolean }) {
     setLookupError("");
     setUnstakePlan(undefined);
     setSharesInput("");
-    setWr(undefined);
     setPos(undefined);
     setReview(undefined);
-    setPlan(undefined);
-    setPrepared(undefined);
   }
+  async function connectWallet() {
+    const wallet = await nearWallet().connect();
+    const owner = (await wallet.getAccounts())[0]?.accountId;
+    if (!owner) throw Error("The wallet returned no NEAR account.");
+    setConnected(owner);
+    if (tab === "Position") {
+      editId(owner);
+      await scan(owner);
+    }
+    return owner;
+  }
+
+  function planFromPayout() {
+    if (!evidence?.payout || record?.account !== connected) return;
+    setRouteAmount(evidence.payout);
+    selectView("Route");
+  }
+
   function selectView(view: View, kind: ReceiptType = receiptType) {
     setTab(view);
     setNavigated(true);
     if (view === "Receipt") setReceiptType(kind);
+    if (view !== "Route") setRouteAmount(undefined);
     setMsg("");
     if (hosted) {
       const url = new URL(window.location.href);
@@ -392,14 +425,7 @@ export default function Desk({ hosted = false }: { hosted?: boolean }) {
                 disabled={busy}
                 onClick={() =>
                   act(async () => {
-                    const wallet = await nearWallet().connect();
-                    const owner = (await wallet.getAccounts())[0]?.accountId;
-                    if (!owner)
-                      throw Error("The wallet returned no NEAR account.");
-                    setConnected(owner);
-                    editId(owner);
-                    selectView("Position");
-                    await scan(owner);
+                    await connectWallet();
                   })
                 }
               >
@@ -564,6 +590,16 @@ export default function Desk({ hosted = false }: { hosted?: boolean }) {
               </p>
             )}
 
+            {pos && (
+              <RecoveryAgent
+                position={pos}
+                busy={busy}
+                reviewClaim={() =>
+                  act(async () => setReview(await reviewWithdrawal(pos.id)))
+                }
+                openReceipt={() => selectView("Receipt", "recovery")}
+              />
+            )}
             {review && (
               <article
                 className="deskCard actionCard orderReview"
@@ -701,39 +737,26 @@ export default function Desk({ hosted = false }: { hosted?: boolean }) {
                   : msg}
               </p>
 
-              {tab === "Route" && hosted && routing === "ready" && (
-                <label>
-                  NEAR account
-                  <input
-                    disabled={busy}
-                    value={account}
-                    placeholder="your-account.near"
-                    autoCapitalize="none"
-                    spellCheck={false}
-                    maxLength={64}
-                    onChange={(event) => editId(event.target.value.trim())}
+              {tab === "Route" &&
+                (hosted ? (
+                  <RouteDesk
+                    connected={connected}
+                    initialSender={account}
+                    initialAmount={routeAmount}
+                    busy={busy}
+                    run={act}
+                    connect={connectWallet}
+                    save={(next) => {
+                      saveRoute(next);
+                      selectView("Receipt", "route");
+                    }}
                   />
-                </label>
-              )}
-              {tab === "Route" && (!hosted || routing !== "ready") && (
-                <div className="routeNotice">
-                  <strong>
-                    {!hosted
-                      ? "Cross-chain routing uses the hosted desk"
-                      : routing === "checking"
-                        ? "Checking Rhea access…"
-                        : "Rhea routing is currently unavailable"}
-                  </strong>
-                  <p>
-                    {!hosted
-                      ? "Use this copy to inspect, unstake, claim and verify NEAR."
-                      : routing === "unavailable"
-                        ? "This deployment needs a Rhea API key for live quotes. You can still claim and verify NEAR."
-                        : routing === "error"
-                          ? "The routing service did not respond. You can still claim and verify NEAR."
-                          : null}
-                  </p>
-                  {routing !== "checking" || !hosted ? (
+                ) : (
+                  <div className="routeNotice">
+                    <strong>Cross-chain routing uses the hosted desk</strong>
+                    <p>
+                      Use this copy to inspect, unstake, claim and verify NEAR.
+                    </p>
                     <button
                       className="minor"
                       type="button"
@@ -741,160 +764,8 @@ export default function Desk({ hosted = false }: { hosted?: boolean }) {
                     >
                       Back to position
                     </button>
-                  ) : null}
-                </div>
-              )}
-              {tab === "Route" && hosted && routing === "ready" && (
-                <>
-                  <label>
-                    Amount on NEAR
-                    <input
-                      value={amount}
-                      disabled={busy}
-                      inputMode="decimal"
-                      onChange={(e) => {
-                        setWr(undefined);
-                        setAmount(e.target.value);
-                        setPlan(undefined);
-                        setPrepared(undefined);
-                      }}
-                    />
-                  </label>
-                  <label>
-                    Receive USDC at this Solana address
-                    <input
-                      value={recipient}
-                      disabled={busy}
-                      autoCapitalize="none"
-                      spellCheck={false}
-                      onChange={(e) => {
-                        setRecipient(e.target.value.trim());
-                        setPlan(undefined);
-                        setPrepared(undefined);
-                      }}
-                    />
-                  </label>
-                  <p>
-                    Rhea supplies live routes. Where the input is wrapped NEAR,
-                    the wallet must already hold enough wNEAR.
-                  </p>
-                  <details>
-                    <summary>Wrap native NEAR for this route</summary>
-                    <p>
-                      Wrapping is a separate NEAR transaction. Review storage
-                      and gas before signing.
-                    </p>
-                    <button
-                      className="minor"
-                      disabled={busy}
-                      onClick={() =>
-                        act(async () =>
-                          setWr(await wrapPreview(account, amount)),
-                        )
-                      }
-                    >
-                      Preview wrap
-                    </button>
-                    {wr && (
-                      <div>
-                        <p>
-                          Wrap {wr.amount} NEAR at wrap.near. Additional storage
-                          deposit: {wr.storage} NEAR. Network gas applies.
-                        </p>
-                        <button
-                          disabled={busy}
-                          onClick={() =>
-                            act(async () => {
-                              const h = await wrap(account, amount, wr.storage);
-                              setWr(undefined);
-                              setMsg("Wallet reported a successful wrap: " + h);
-                            })
-                          }
-                        >
-                          Sign wrap
-                        </button>
-                      </div>
-                    )}
-                  </details>
-                  <button
-                    disabled={busy}
-                    onClick={() =>
-                      act(async () => {
-                        setPlan(undefined);
-                        setPrepared(undefined);
-                        const quote = await quoteRoute(
-                          account,
-                          recipient,
-                          amount,
-                        );
-                        setNow(Date.now());
-                        setPlan(quote);
-                      })
-                    }
-                  >
-                    Request Rhea quote ↗
-                  </button>
-                  {plan && (
-                    <div className="receipt">
-                      <small>LIVE QUOTE / {plan.q.route.router}</small>
-                      <pre>
-                        {plan.amount} {plan.symbol} → Solana USDC
-                        <br />
-                        Expected　
-                        {formatUnits(plan.q.estimatedOut, plan.decimals)}
-                        <br />
-                        Minimum　
-                        {formatUnits(plan.q.minAmountOut, plan.decimals)}
-                        <br />
-                        Recipient　{plan.recipient}
-                      </pre>
-                      <p className="quoteExpiry">
-                        {now >= plan.expiresAt
-                          ? "Quote expired. Request a fresh quote."
-                          : `Review window: ${Math.ceil((plan.expiresAt - now) / 1000)}s · Slippage 0.50%`}
-                      </p>
-                      {prepared ? (
-                        <div className="orderReview">
-                          <small>WALLET REVIEW</small>
-                          <p>
-                            Receivers: {prepared.receivers.join(", ")}
-                            <br />
-                            Additional attached NEAR: {prepared.attachedNear}
-                            <br />
-                            Network gas applies.
-                          </p>
-                          <button
-                            disabled={busy || now >= plan.expiresAt}
-                            onClick={() =>
-                              act(async () => {
-                                setPlan(undefined);
-                                setPrepared(undefined);
-                                await executeRoute(plan, prepared, (next) => {
-                                  selectView("Receipt", "route");
-                                  saveRoute(next);
-                                });
-                              })
-                            }
-                          >
-                            Review in wallet ↗
-                          </button>
-                        </div>
-                      ) : (
-                        <button
-                          disabled={busy || now >= plan.expiresAt}
-                          onClick={() =>
-                            act(async () =>
-                              setPrepared(await prepareRoute(plan)),
-                            )
-                          }
-                        >
-                          Prepare wallet review
-                        </button>
-                      )}
-                    </div>
-                  )}
-                </>
-              )}
+                  </div>
+                ))}
               {tab === "Receipt" && (
                 <>
                   <div className="tabs receiptTabs" aria-label="Receipt type">
@@ -923,6 +794,14 @@ export default function Desk({ hosted = false }: { hosted?: boolean }) {
                       evidence={evidence}
                       run={act}
                       verify={checkRecovery}
+                      shareable={hosted}
+                      onRoute={
+                        hosted &&
+                        evidence?.payout &&
+                        record?.account === connected
+                          ? planFromPayout
+                          : undefined
+                      }
                     />
                   ) : (
                     <>
@@ -932,14 +811,17 @@ export default function Desk({ hosted = false }: { hosted?: boolean }) {
                             <div>
                               <small>NEAR → SOLANA</small>
                               <h4>
-                                {receipt.input} {receipt.asset} to USDC
+                                {receipt.input} {receipt.asset} to{" "}
+                                {receiptAsset.symbol}
                               </h4>
                             </div>
                           </div>
                           <dl className="proofDetails">
                             <div>
                               <dt>Minimum quoted</dt>
-                              <dd>{receipt.minimum} USDC</dd>
+                              <dd>
+                                {receipt.minimum} {receiptAsset.symbol}
+                              </dd>
                             </div>
                             <div>
                               <dt>Sender</dt>
@@ -973,20 +855,25 @@ export default function Desk({ hosted = false }: { hosted?: boolean }) {
                               </dd>
                             </div>
                             <div>
-                              <dt>Saved Rhea status</dt>
+                              <dt>
+                                {receipt.provider === "intents"
+                                  ? "Saved NEAR Intents status"
+                                  : "Saved Rhea status"}
+                              </dt>
                               <dd>{receipt.status}</dd>
                             </div>
                             <div>
                               <dt>Tracking ID</dt>
                               <dd>
-                                {receipt.recordId ??
+                                {receipt.depositAddress ??
+                                  receipt.recordId ??
                                   receipt.orderId ??
                                   "Unavailable"}
                               </dd>
                             </div>
                             {receipt.destinationTx && (
                               <div>
-                                <dt>Rhea-reported Solana hash</dt>
+                                <dt>Solana transaction hash</dt>
                                 <dd>
                                   <a
                                     href={
@@ -1001,6 +888,24 @@ export default function Desk({ hosted = false }: { hosted?: boolean }) {
                                 </dd>
                               </div>
                             )}
+                            {delivery?.signature === receipt.destinationTx &&
+                              delivery?.recipient === receipt.recipient &&
+                              delivery.output === receiptAsset.symbol &&
+                              delivery.minimum === receipt.minimum && (
+                                <div className="payout">
+                                  <dt>
+                                    {receiptAsset.symbol} verified on Solana
+                                  </dt>
+                                  <dd>
+                                    {formatUnits(
+                                      delivery.amount,
+                                      receiptAsset.decimals,
+                                    )}{" "}
+                                    {receiptAsset.symbol} · Slot{" "}
+                                    {delivery.slot.toLocaleString()}
+                                  </dd>
+                                </div>
+                              )}
                           </dl>
                           <div className="deskActions">
                             <button
@@ -1014,21 +919,36 @@ export default function Desk({ hosted = false }: { hosted?: boolean }) {
                             >
                               Check NEAR hashes
                             </button>
-                            {hosted &&
-                              (receipt.recordId || receipt.orderId) && (
-                                <button
-                                  type="button"
-                                  className="minor"
-                                  disabled={busy}
-                                  onClick={() =>
-                                    act(async () =>
-                                      saveRoute(await refreshReceipt(receipt)),
-                                    )
-                                  }
-                                >
-                                  Refresh Rhea order
-                                </button>
-                              )}
+                            {(receipt.provider === "intents" ||
+                              (hosted &&
+                                (receipt.recordId || receipt.orderId))) && (
+                              <button
+                                type="button"
+                                className="minor"
+                                disabled={busy}
+                                onClick={() =>
+                                  act(async () =>
+                                    saveRoute(
+                                      await (receipt.provider === "intents"
+                                        ? refreshIntentReceipt(receipt)
+                                        : refreshReceipt(receipt)),
+                                    ),
+                                  )
+                                }
+                              >
+                                Refresh provider order
+                              </button>
+                            )}
+                            {receipt.destinationTx && (
+                              <button
+                                type="button"
+                                className="minor"
+                                disabled={busy}
+                                onClick={() => runDeliveryCheck(receipt)}
+                              >
+                                Verify Solana delivery
+                              </button>
+                            )}
                             <button
                               type="button"
                               className="minor"
@@ -1045,8 +965,8 @@ export default function Desk({ hosted = false }: { hosted?: boolean }) {
                         </article>
                       ) : (
                         <p>
-                          Submit a Rhea transfer or import a saved route receipt
-                          to check its NEAR source.
+                          Submit a transfer or import a saved route receipt to
+                          check its NEAR source.
                         </p>
                       )}
                       <label>
@@ -1087,15 +1007,15 @@ export default function Desk({ hosted = false }: { hosted?: boolean }) {
                   <div className="sideCheck">
                     <Icon name="wallet" />
                     <p>
-                      <strong>Source wallet</strong>Check whether the route
-                      spends NEAR or wNEAR.
+                      <strong>Source wallet</strong>Review the asset, amount and
+                      network gas before signing.
                     </p>
                   </div>
                   <div className="sideCheck">
                     <Icon name="route" />
                     <p>
                       <strong>Solana recipient</strong>Review the address and
-                      minimum USDC in the quote.
+                      minimum output in the quote.
                     </p>
                   </div>
                   <div className="sideCheck">
@@ -1131,8 +1051,8 @@ export default function Desk({ hosted = false }: { hosted?: boolean }) {
                   <div className="sideCheck">
                     <Icon name="route" />
                     <p>
-                      <strong>Cross-chain delivery</strong>Rhea provides its own
-                      order status and any destination hash it has recorded.
+                      <strong>Cross-chain delivery</strong>Check the provider’s
+                      status, then verify the balance change on Solana.
                     </p>
                   </div>
                 </>

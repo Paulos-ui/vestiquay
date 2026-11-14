@@ -21,6 +21,31 @@ assert.equal(
   403,
 );
 assert.equal((await forwardRhea(new Request(base + "/unlisted"))).status, 404);
+const savedFetch = globalThis.fetch;
+try {
+  globalThis.fetch = async (_url, init) => {
+    assert.equal(init.headers.Authorization, "Bearer fixture");
+    return Response.json({ msg: "blocked" }, { status: 403 });
+  };
+  const denied = await forwardRhea(
+    new Request(quote, { method: "POST" }),
+    "fixture",
+  );
+  assert.equal(denied.status, 403);
+  assert.match((await denied.json()).msg, /Rhea denied this swap API request/);
+  globalThis.fetch = async (_url, init) => {
+    assert.equal(init.headers.Authorization, undefined);
+    return Response.json({ msg: "blocked" }, { status: 403 });
+  };
+  const catalog = await forwardRhea(
+    new Request(base + "/get_chain_prices?chain=900001"),
+    "fixture",
+  );
+  assert.equal(catalog.status, 403);
+  assert.match((await catalog.json()).msg, /public token catalog/);
+} finally {
+  globalThis.fetch = savedFetch;
+}
 const { default: worker } = await import("../dist/server/index.js");
 for (const resource of [
   "/",
@@ -55,3 +80,4 @@ assert.match(client, /vestiquay\.theme/);
 console.log(
   "Landing, desk, theme assets, independent client and Rhea credential boundary passed.",
 );
+await import("./check-recovery.mjs");

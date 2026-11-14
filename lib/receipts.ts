@@ -18,7 +18,10 @@ type NearTransaction = {
     hash: string;
     signer_id: string;
     receiver_id: string;
-    actions: Array<{ FunctionCall?: { method_name: string; args: string } }>;
+    actions: Array<{
+      FunctionCall?: { method_name: string; args: string };
+      Transfer?: { deposit: string };
+    }>;
   };
   transaction_outcome?: { block_hash: string };
   receipts?: Array<{
@@ -31,6 +34,7 @@ type NearTransaction = {
   }>;
   receipts_outcome?: Array<{
     id: string;
+    block_hash?: string;
     outcome: { status: { SuccessValue?: string } | string };
   }>;
 };
@@ -42,11 +46,12 @@ export type RecoveryEvidence = {
   payout?: string;
   execution: NearExecution;
   blockHash?: string;
+  claimBlockHash?: string;
   checkedAt: number;
 };
 
 export const recoveryReceiptKey = "vestiquay.recovery.v1";
-const archival = new NearRpcProvider(
+export const archival = new NearRpcProvider(
   ["https://archival-rpc.mainnet.fastnear.com"],
   12000,
 );
@@ -122,7 +127,11 @@ async function readTransaction(
   }
 }
 
-export async function verifyNearSource(account: string, hash: string) {
+export async function verifyNearSource(
+  account: string,
+  hash: string,
+  deposit?: { receiver: string; amount: string },
+) {
   const r = recoveryReceipt(account, hash);
   const outcome = await readTransaction(r.account, r.hash);
   if (
@@ -133,6 +142,15 @@ export async function verifyNearSource(account: string, hash: string) {
     throw Error(
       "The NEAR transaction does not match the supplied hash and signer.",
     );
+  if (deposit && outcome.transaction) {
+    const tx = outcome.transaction;
+    if (
+      tx.receiver_id !== deposit.receiver ||
+      tx.actions?.length !== 1 ||
+      tx.actions[0].Transfer?.deposit !== deposit.amount
+    )
+      throw Error("This NEAR transaction does not match the quoted deposit.");
+  }
   return outcome.transaction ? executionStatus(outcome) : "pending";
 }
 
@@ -171,16 +189,29 @@ export async function verifyRecovery(
     } catch {}
   }
   const execution = executionStatus(outcome);
+  const isWithdrawal = call.method_name.startsWith("withdraw");
   const payout =
-    execution === "confirmed" && call.method_name.startsWith("withdraw")
+    execution === "confirmed" && isWithdrawal
       ? confirmedPayout(outcome, r.account)
       : undefined;
+  const claim =
+    isWithdrawal &&
+    outcome.receipts?.find(
+      (receipt) =>
+        receipt.predecessor_id === r.account &&
+        receipt.receiver_id === stakingContract,
+    );
+  const claimBlockHash = claim
+    ? outcome.receipts_outcome?.find((item) => item.id === claim.receipt_id)
+        ?.block_hash
+    : undefined;
   return {
     method: call.method_name,
     requested,
     payout,
     execution,
     blockHash: outcome.transaction_outcome?.block_hash,
+    claimBlockHash,
     checkedAt,
   };
 }

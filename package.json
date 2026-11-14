@@ -1,6 +1,6 @@
 {
   "name": "vestiquay",
-  "version": "0.4.0",
+  "version": "0.5.1",
   "private": true,
   "scripts": {
     "dev": "node scripts/preview.mjs",
@@ -11,6 +11,8 @@
     "@hot-labs/near-connect": "0.12.0",
     "@rhea-finance/cross-chain-aggregation-dex": "2.1.9",
     "@rhea-finance/rnear-sdk": "0.1.1",
+    "@wallet-standard/app": "1.1.1",
+    "@wallet-standard/features": "1.1.1",
     "motion": "^12.0.0",
     "next": "^15.5.0",
     "react": "^19.0.0",

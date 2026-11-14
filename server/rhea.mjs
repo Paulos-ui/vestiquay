@@ -54,7 +54,9 @@ export async function forwardRhea(req, secret) {
     if (r.status === 401 || r.status === 403)
       return Response.json(
         {
-          msg: "Rhea rejected the routing credential. NEAR recovery is still available.",
+          msg: catalog
+            ? "Rhea denied access to the public token catalog."
+            : "Rhea denied this swap API request. Check Production access in the Rhea Boss portal or use NEAR Intents.",
         },
         { status: r.status, headers: { "Cache-Control": "no-store" } },
       );

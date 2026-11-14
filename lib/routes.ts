@@ -9,6 +9,7 @@ import { createNearExecutor } from "@rhea-finance/cross-chain-aggregation-dex/ex
 import { rpc, walletFor, accountId, wrapContract } from "./recovery";
 import { isBase58Bytes } from "./addresses";
 import { verifyNearSource, type NearExecution } from "./receipts";
+import { solanaDestinations, type SolanaDestination } from "./route-assets";
 export { formatUnits };
 const baseUrl =
   process.env.NEXT_PUBLIC_RHEA_PROXY !== "0" &&
@@ -30,23 +31,26 @@ export type RouteReceipt = {
   txHashes: string[];
   destinationTx?: string;
   sourceStatus?: NearExecution;
+  provider?: "intents";
+  depositAddress?: string;
+  output?: SolanaDestination;
 };
 export const receiptKey = "vestiquay.route.v2";
-const usdcMint = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
-const solanaUsdcAsset =
-  "nep141:sol-5ce3bf3a31af18be40ba30f721101b4341690186.omft.near";
 const decimal = /^\d{1,39}(?:\.\d{1,24})?$/;
 
-export async function routingConfigured() {
-  const result = await fetch("/rhea/availability", {
-    cache: "no-store",
-    signal: AbortSignal.timeout(7000),
-  });
-  if (!result.ok) throw Error("Could not check Rhea routing access.");
-  const data = await result.json();
-  if (typeof data.configured !== "boolean")
-    throw Error("Could not check Rhea routing access.");
-  return data.configured as boolean;
+export async function rheaRouteAvailability() {
+  try {
+    const result = await fetch("/rhea/availability", {
+      cache: "no-store",
+      signal: AbortSignal.timeout(7000),
+    });
+    if (!result.ok) return "unavailable";
+    const data = await result.json();
+    if (data.configured === true) return "ready";
+    return data.configured === false ? "unconfigured" : "unavailable";
+  } catch {
+    return "unavailable";
+  }
 }
 
 export function validateReceipt(value: unknown): RouteReceipt {
@@ -68,10 +72,18 @@ export function validateReceipt(value: unknown): RouteReceipt {
     typeof r.input !== "string" ||
     !decimal.test(r.input) ||
     (r.asset !== "NEAR" && r.asset !== "wNEAR") ||
+    (r.output !== undefined &&
+      r.output !== "USDC" &&
+      (r.output !== "SOL" || r.provider !== "intents")) ||
     [r.recordId, r.orderId, r.router].some(
       (item) =>
         item !== undefined && (typeof item !== "string" || item.length > 256),
     ) ||
+    (r.provider !== undefined &&
+      (r.provider !== "intents" ||
+        r.asset !== "NEAR" ||
+        typeof r.depositAddress !== "string" ||
+        !/^[a-f0-9]{64}$/.test(r.depositAddress))) ||
     (r.destinationTx !== undefined &&
       (typeof r.destinationTx !== "string" ||
         !isBase58Bytes(r.destinationTx, 64)))
@@ -90,6 +102,9 @@ export function validateReceipt(value: unknown): RouteReceipt {
     orderId,
     router,
     destinationTx,
+    provider,
+    depositAddress,
+    output,
   } = r;
   return {
     sender: accountId(sender),
@@ -104,8 +119,15 @@ export function validateReceipt(value: unknown): RouteReceipt {
     orderId,
     router,
     destinationTx,
+    provider,
+    depositAddress: provider === "intents" ? depositAddress : undefined,
+    output,
   };
 }
+const publicCatalog = new SwapClient({
+  baseUrl: "https://api.rhea.finance",
+  timeoutMs: 20000,
+});
 function makeClient() {
   return new SwapClient({ baseUrl, timeoutMs: 20000 });
 }
@@ -124,11 +146,14 @@ export async function quoteRoute(
     throw Error("Enter a Solana destination address.");
   if (!decimal.test(amount) || BigInt(parseUnits(amount, 24)) <= 0n)
     throw Error("Enter a positive source amount.");
-  const c = client(),
-    [from, to] = await Promise.all([
-      c.getFromTokens({ chainId: 900001 }),
-      c.getCrossChainToTokens({ chainId: 501 }),
-    ]);
+  const [from, to] = await Promise.all([
+    publicCatalog.getFromTokens({ chainId: 900001 }),
+    publicCatalog.getCrossChainToTokens({ chainId: 501 }),
+  ]).catch(() => {
+    throw Error(
+      "The public Rhea token catalog is unavailable. Try NEAR Intents for this route.",
+    );
+  });
   const tokenIn =
     from.find((a) => a.isNative && a.symbol.toUpperCase() === "NEAR") ??
     from.find(
@@ -141,19 +166,19 @@ export async function quoteRoute(
     to.find(
       (a) =>
         a.symbol === "USDC" &&
-        a.decimals === 6 &&
-        a.contractAddress === usdcMint,
+        a.decimals === solanaDestinations.USDC.decimals &&
+        a.contractAddress === solanaDestinations.USDC.mint,
     ) ??
     to.find(
       (a) =>
         a.symbol === "USDC" &&
-        a.decimals === 6 &&
+        a.decimals === solanaDestinations.USDC.decimals &&
         a.contractAddress == null &&
-        a.assetId === solanaUsdcAsset,
+        a.assetId === solanaDestinations.USDC.assetId,
     );
   if (!tokenIn || tokenIn.decimals !== 24 || !tokenOut)
     throw Error("Rhea currently lists no matching NEAR / Solana USDC assets.");
-  const q = await c.quote({
+  const q = await client().quote({
     fromChain: "near",
     toChain: "solana",
     tokenIn,
@@ -255,6 +280,7 @@ export async function prepareRoute(
   const quotedInput = q.tokenIn.isNative
     ? [q.tokenIn.address, String(q.buildContext.request.tokenIn)]
     : [q.tokenIn.address, wrapContract, "nep141:" + wrapContract];
+  const output = solanaDestinations.USDC;
   if (
     build.execution.kind !== "near-transaction-batch" ||
     !build.isCrossChain ||
@@ -262,8 +288,9 @@ export async function prepareRoute(
     build.toChain !== "solana" ||
     build.tokenIn.decimals !== 24 ||
     !quotedInput.includes(build.tokenIn.address) ||
-    build.tokenOut.decimals !== 6 ||
-    ![usdcMint, solanaUsdcAsset].includes(build.tokenOut.address) ||
+    build.tokenOut.decimals !== output.decimals ||
+    (build.tokenOut.address !== output.mint &&
+      build.tokenOut.address !== output.assetId) ||
     build.amountIn !== q.amountIn ||
     BigInt(build.minAmountOut) < BigInt(q.minAmountOut)
   )
@@ -421,8 +448,17 @@ export async function refreshReceipt(r: RouteReceipt) {
 export async function refreshRouteSource(receipt: RouteReceipt) {
   if (!receipt.txHashes.length)
     throw Error("This receipt has no NEAR transaction hash.");
+  const deposit =
+    receipt.provider === "intents" && receipt.depositAddress
+      ? {
+          receiver: receipt.depositAddress,
+          amount: parseUnits(receipt.input, 24),
+        }
+      : undefined;
   const checks = await Promise.all(
-    receipt.txHashes.map((hash) => verifyNearSource(receipt.sender, hash)),
+    receipt.txHashes.map((hash) =>
+      verifyNearSource(receipt.sender, hash, deposit),
+    ),
   );
   const sourceStatus: NearExecution = checks.includes("failed")
     ? "failed"

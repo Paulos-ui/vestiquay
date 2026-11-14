@@ -337,7 +337,8 @@
   font: 600 13px/1.35 var(--font);
   color: var(--ink);
 }
-.desk input {
+.desk input,
+.desk .destinationSelect {
   display: block;
   width: 100%;
   min-width: 0;
@@ -979,4 +980,127 @@
 }
 .balanceReadings dd {
   word-break: normal;
+}
+
+.exitAgent {
+  grid-column: 1 / -1;
+  border-color: var(--line-bright);
+  background: linear-gradient(120deg, var(--accent-soft), var(--surface) 70%);
+}
+
+.agentDecision,
+.replayProof,
+.routeSender {
+  border: 1px solid var(--line-bright);
+  border-radius: 10px;
+  padding: 14px;
+  background: var(--surface-deep);
+}
+
+.agentDecision {
+  margin-bottom: 13px;
+}
+.agentDecision strong {
+  font-size: 20px;
+  letter-spacing: -0.035em;
+}
+.agentDecision p,
+.replayProof p,
+.recipientWallet p,
+.routeSenderInput p,
+.routeQuote > p:not(.eyebrow) {
+  margin-top: 5px;
+  color: var(--muted);
+  font-size: 13px;
+}
+.agentDecision .agentAmount {
+  color: var(--accent);
+  font-family: var(--mono);
+}
+.agentDecision[data-action="claim"] {
+  border-color: var(--mint);
+}
+.agentDecision[data-action="wait"] {
+  border-color: var(--warning);
+}
+
+.replayProof {
+  margin: 0 0 19px;
+}
+.replayProof h3 {
+  font-size: 20px;
+  letter-spacing: -0.035em;
+}
+.replayProof .proofDetails a {
+  display: inline-block;
+  margin-top: 4px;
+  font-size: 11px;
+}
+.proofShare {
+  display: block;
+  margin-top: 10px;
+}
+
+.routeInputs {
+  display: grid;
+  gap: 15px;
+}
+.routeInputs input,
+.routeInputs .destinationSelect {
+  margin-bottom: 0;
+}
+.routeInputs > button,
+.routeQuote > button {
+  justify-self: start;
+}
+.routeInputs details {
+  margin-block: 0;
+}
+.routeSender {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+}
+.routeSender small,
+.routeSender strong {
+  display: block;
+}
+.routeSender small {
+  color: var(--muted);
+  font-size: 11px;
+}
+.routeSender strong {
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+.routeSenderInput > button,
+.recipientWallet .deskActions {
+  margin-top: 8px;
+}
+.recipientWallet .deskActions:empty {
+  display: none;
+}
+.routeQuote .orderReview {
+  margin-bottom: 12px;
+}
+.routeQuote > p {
+  margin-bottom: 12px;
+}
+.rheaRouteNote {
+  color: var(--muted);
+  margin-bottom: 12px;
+  font-size: 13px;
+}
+@media (max-width: 610px) {
+  .exitAgent {
+    grid-column: auto;
+  }
+  .routeSender {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+  .routeSender .evidenceTag {
+    grid-column: 2;
+    justify-self: start;
+  }
 }

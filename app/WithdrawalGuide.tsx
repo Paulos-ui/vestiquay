@@ -17,7 +17,7 @@ const questions = [
   ],
   [
     "Can I send recovered funds to Solana?",
-    "On deployments with a Rhea routing credential, request a quote for USDC on Solana. The desk shows the minimum output and wallet actions. Keeping the funds in your NEAR wallet is also an option.",
+    "The hosted desk can quote Solana USDC or native SOL through NEAR Intents. Review the destination and the minimum output, then approve the native NEAR deposit in your wallet. You can also keep the payout in your NEAR wallet.",
   ],
 ];
 

@@ -160,7 +160,7 @@ export default function Landing() {
                   Open recovery desk <Icon name="arrow" />
                 </a>
                 <a className="button secondary" href={proofUrl}>
-                  Verify a withdrawal <Icon name="diagonal" />
+                  Replay a withdrawal <Icon name="diagonal" />
                 </a>
               </div>
             </motion.div>
@@ -273,11 +273,11 @@ export default function Landing() {
               <h2>See what reached the wallet.</h2>
               <p>
                 Open a historical mainnet withdrawal and have Vestiquay read the
-                chain again. The receipt shows final execution and the exact
-                amount from the matching transfer.
+                chain again. Replay the claim to compare the pending balance
+                before and after it with the exact NEAR that reached the wallet.
               </p>
               <a className="button" href={proofUrl}>
-                Verify on NEAR <Icon name="arrow" />
+                Open the claim replay <Icon name="arrow" />
               </a>
             </Reveal>
           </div>
@@ -340,12 +340,12 @@ export default function Landing() {
               <p className="eyebrow">Optional cross-chain route</p>
               <h2>Choose where the funds go next.</h2>
               <p>
-                Keep the proceeds on NEAR or request a Rhea quote for USDC on
-                Solana. Review the recipient, minimum output and quote expiry
-                before signing.
+                Keep the proceeds on NEAR or quote USDC or native SOL through
+                NEAR Intents. Use your connected NEAR wallet as the sender and
+                review the Solana recipient and minimum output before signing.
               </p>
               <a className="inlineLink" href="/desk?tab=Route">
-                Check Rhea routing access <Icon name="diagonal" />
+                Open the wallet route <Icon name="diagonal" />
               </a>
             </Reveal>
           </div>
